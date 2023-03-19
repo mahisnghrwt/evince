@@ -23,6 +23,7 @@
 #include <config.h>
 
 #include <fcntl.h>
+#include <errno.h>
 
 #if GTKUNIXPRINT_ENABLED
 #include <gtk/gtkunixprint.h>

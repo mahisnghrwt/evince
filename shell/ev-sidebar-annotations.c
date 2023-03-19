@@ -31,6 +31,127 @@
 #include "ev-window.h"
 #include "ev-utils.h"
 
+typedef struct _Node
+{
+	void* data;
+	struct _Node* next;
+} _Node;
+
+typedef struct _LinkedList
+{
+	int size;
+	_Node* head;
+	_Node* tail;
+} _LinkedList;
+
+static void linked_list_init(_LinkedList* list)
+{
+	list->size = 0;
+	list->head = NULL;
+	list->tail = NULL;
+}
+
+static _LinkedList* linked_list_new()
+{
+	_LinkedList* list = malloc(sizeof(_LinkedList));
+	linked_list_init(list);
+	return list;
+}
+
+static void linked_list_free(_LinkedList* list)
+{
+	_Node* node = list->head;
+	while (node != NULL)
+	{
+		_Node* next_node = node->next;
+		free(node);
+		node = next_node;
+	}
+}
+
+static void linked_list_append(_LinkedList* linked_list, void* data)
+{
+	_Node* node = malloc(sizeof(_Node));
+	node->data = data;
+	node->next = NULL;
+	if (linked_list->head == NULL)
+	{
+		linked_list->head = node;
+	}
+	else
+	{
+		linked_list->tail->next = node;
+	}
+	linked_list->tail = node;
+	++linked_list->size;
+}
+
+static void linked_list_iterate(_LinkedList* list, void (*cb)(void* data))
+{
+	_Node* node = list->head;
+	while (node != NULL)
+	{
+		cb(node->data);
+		node = node->next;
+	}
+}
+
+static void* linked_list_find(_LinkedList* list, int (*predicate)(void* data))
+{
+	_Node* node = list->head;
+	while (node != NULL)
+	{
+		if (predicate(node->data) == 0)
+		{
+			return node->data;
+		}
+		node = node->next;
+	}
+	return NULL;
+}
+
+typedef struct _ColorAnnotations
+{
+	GdkRGBA rgba;
+	_LinkedList annotations;
+
+} _ColorAnnotations;
+
+static _ColorAnnotations* color_annotations_new()
+{
+	_ColorAnnotations* color_annotations = malloc(sizeof(_ColorAnnotations));
+	
+	color_annotations->rgba.alpha = 0;
+	color_annotations->rgba.blue = 0;
+	color_annotations->rgba.green = 0;
+	color_annotations->rgba.red = 0;
+	linked_list_init(&color_annotations->annotations);
+
+	return color_annotations;
+}
+
+static GdkRGBA gdkrgba_comparator_source = {.alpha = 0, .blue = 0, .green = 0, .red = 0};
+
+static int gdkrgba_comparator(void* data)
+{
+	GdkRGBA* color = data;
+	if (gdkrgba_comparator_source.red == color->red && gdkrgba_comparator_source.green == color->green &&
+	    gdkrgba_comparator_source.blue == color->blue && gdkrgba_comparator_source.alpha == color->alpha)
+	{
+		return 0;
+	}
+	return 1;
+}
+
+static gchar* rgba_to_hex(GdkRGBA rgba)
+{
+	int red = rgba.red * 255;
+	int green = rgba.green * 255;
+	int blue = rgba.blue * 255;
+	int alpha = rgba.alpha * 255;
+    return g_strdup_printf("#%02x%02x%02x%02x", red, green, blue, alpha);
+}
+
 enum {
 	PROP_0,
 	PROP_WIDGET
@@ -399,24 +520,66 @@ job_finished_callback (EvJobAnnots          *job,
 				    G_TYPE_POINTER,
 				    G_TYPE_STRING);
 
-	for (l = job->annots; l; l = g_list_next (l)) {
-		EvMappingList *mapping_list;
-		GList         *ll;
-		gchar         *page_label;
-		GtkTreeIter    iter;
-		gboolean       found = FALSE;
+	_LinkedList map;
+	linked_list_init(&map);
 
-		mapping_list = (EvMappingList *)l->data;
-		page_label = g_strdup_printf (_("Page %d"),
-					      ev_mapping_list_get_page (mapping_list) + 1);
-		gtk_tree_store_append (model, &iter, NULL);
-		gtk_tree_store_set (model, &iter,
-				    COLUMN_MARKUP, page_label,
-				    -1);
-		g_free (page_label);
+	for (l = job->annots; l; l = g_list_next(l))
+	{
+		EvMappingList* mapping_list;
+		GList* ll;
+		gchar* page_label;
+		GtkTreeIter iter;
+		gboolean found = FALSE;
 
-		for (ll = ev_mapping_list_get_list (mapping_list); ll; ll = g_list_next (ll)) {
-			EvAnnotation *annot;
+		mapping_list = (EvMappingList*)l->data;
+		for (ll = ev_mapping_list_get_list(mapping_list); ll; ll = g_list_next(ll))
+		{
+			EvAnnotation* annot = ((EvMapping*)(ll->data))->data;
+
+			if (!EV_IS_ANNOTATION_MARKUP (annot))
+				continue;
+
+			GdkRGBA rgba;
+			ev_annotation_get_rgba(annot, &rgba);
+			gdkrgba_comparator_source = rgba;
+			_ColorAnnotations* color_annot = linked_list_find(&map, gdkrgba_comparator);
+			if (color_annot == NULL)
+			{
+				// init _ColorAnnotations
+				_ColorAnnotations* color_annot_da = color_annotations_new();
+				color_annot_da->rgba = rgba;
+
+				linked_list_append(&color_annot_da->annotations, annot);
+				linked_list_append(&map, color_annot_da);
+			}
+			else
+			{
+				linked_list_append(&color_annot->annotations, annot);
+			}
+		}
+	}
+
+	_Node* color_node = map.head;
+	while (color_node != NULL)
+	{
+		EvMappingList* mapping_list;
+		GList* ll;
+		gchar* page_label;
+		GtkTreeIter iter;
+		gboolean found = FALSE;
+
+		_ColorAnnotations* annots = (_ColorAnnotations*)color_node->data;
+		const gchar* color_hex = rgba_to_hex(annots->rgba);
+		const gchar* tag = g_strdup_printf("<span background=\"%s\" foreground=\"white\">*****</span>", color_hex);
+		gtk_tree_store_append(model, &iter, NULL);
+		gtk_tree_store_set(model, &iter, COLUMN_MARKUP, tag, -1);
+		g_free(tag);
+		g_free(color_hex);
+
+		_Node* annot_node = annots->annotations.head;
+		while (annot_node != NULL)
+		{
+			EvAnnotation *annot = annot_node->data;
 			const gchar  *label;
 			const gchar  *modified;
 			const gchar  *contents;
@@ -424,10 +587,6 @@ job_finished_callback (EvJobAnnots          *job,
 			gchar        *tooltip = NULL;
 			GtkTreeIter   child_iter;
 			const gchar  *icon_name = NULL;
-
-			annot = ((EvMapping *)(ll->data))->data;
-			if (!EV_IS_ANNOTATION_MARKUP (annot))
-				continue;
 
 			label = ev_annotation_markup_get_label (EV_ANNOTATION_MARKUP (annot));
 			modified = ev_annotation_get_modified (annot);
@@ -469,16 +628,20 @@ job_finished_callback (EvJobAnnots          *job,
 			gtk_tree_store_set (model, &child_iter,
 					    COLUMN_MARKUP, markup,
 					    COLUMN_ICON, icon_name,
-					    COLUMN_ANNOT_MAPPING, ll->data,
+					    COLUMN_ANNOT_MAPPING, annot_node->data,
 					    COLUMN_TOOLTIP, tooltip,
 					    -1);
 			g_free (markup);
 			g_free (tooltip);
 			found = TRUE;
+
+			annot_node = annot_node->next;
 		}
 
 		if (!found)
 			gtk_tree_store_remove (model, &iter);
+
+		color_node = color_node->next;
 	}
 
 	gtk_tree_view_set_model (GTK_TREE_VIEW (priv->tree_view),
